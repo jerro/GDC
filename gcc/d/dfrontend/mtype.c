@@ -3319,6 +3319,8 @@ TypeBasic *TypeBasic::isTypeBasic()
 
 /* The basetype must be one of:
  *   byte[16],ubyte[16],short[8],ushort[8],int[4],uint[4],long[2],ulong[2],float[4],double[2]
+ * For AVX:
+ *   byte[32],ubyte[32],short[16],ushort[16],int[8],uint[8],long[4],ulong[4],float[8],double[4]
  */
 TypeVector::TypeVector(Loc loc, Type *basetype)
         : Type(Tvector)
@@ -3338,8 +3340,9 @@ Type *TypeVector::semantic(Loc loc, Scope *sc)
     if (errors != global.errors)
         return terror;
     basetype = basetype->toBasetype()->mutableOf();
-    if (basetype->ty != Tsarray || basetype->size() != 16)
-    {   error(loc, "base type of __vector must be a 16 byte static array, not %s", basetype->toChars());
+    d_uns64 sz = basetype->size();
+    if (basetype->ty != Tsarray || (sz != 16  && sz != 32))
+    {   error(loc, "base type of __vector must be a 16 or 32 byte static array, not %s", basetype->toChars());
         return terror;
     }
     TypeSArray *t = (TypeSArray *)basetype;
@@ -3394,12 +3397,12 @@ void TypeVector::toDecoBuffer(OutBuffer *buf, int flag)
 
 d_uns64 TypeVector::size(Loc loc)
 {
-    return 16;
+    return basetype->size();
 }
 
 unsigned TypeVector::alignsize()
 {
-    return 16;
+    return (unsigned) basetype->size();
 }
 
 Expression *TypeVector::getProperty(Loc loc, Identifier *ident)
