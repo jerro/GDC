@@ -199,8 +199,9 @@ gcc_type_to_d_type(tree t)
             {
                 d = new TypeSArray(d, new IntegerExp(0, TYPE_VECTOR_SUBPARTS(t), Type::tindex));
 
-                // For now, only support 128bit vectors... what about 64bit?
-                if (d->size() != 16 || d->nextOf()->isTypeBasic() == NULL)
+                // For now, only support 128bit and 256bit vectors... what about 64bit?
+                d_uns64 sz = d->size();
+                if ((sz != 16 && sz != 32) || d->nextOf()->isTypeBasic() == NULL)
                     break;
 
                 d = new TypeVector(0, d);
