@@ -1,6 +1,6 @@
 
 // Compiler implementation of the D programming language
-// Copyright (c) 1999-2011 by Digital Mars
+// Copyright (c) 1999-2012 by Digital Mars
 // All Rights Reserved
 // written by Walter Bright
 // http://www.digitalmars.com
@@ -194,7 +194,7 @@ char Type::needThisPrefix()
 
 void Type::init()
 {
-    stringtable.init();
+    stringtable.init(1543);
     Lexer::initKeywords();
 
     for (size_t i = 0; i < TMAX; i++)
@@ -216,6 +216,8 @@ void Type::init()
     sizeTy[Ttuple] = sizeof(TypeTuple);
     sizeTy[Tslice] = sizeof(TypeSlice);
     sizeTy[Treturn] = sizeof(TypeReturn);
+    sizeTy[Terror] = sizeof(TypeError);
+    sizeTy[Tnull] = sizeof(TypeNull);
 
     mangleChar[Tarray] = 'A';
     mangleChar[Tsarray] = 'G';
@@ -932,6 +934,7 @@ Type *Type::makeConst()
     t->wto = NULL;
     t->swto = NULL;
     t->vtinfo = NULL;
+    t->ctype = NULL;
     //printf("-Type::makeConst() %p, %s\n", t, toChars());
     return t;
 }
@@ -955,6 +958,7 @@ Type *Type::makeInvariant()
     t->wto = NULL;
     t->swto = NULL;
     t->vtinfo = NULL;
+    t->ctype = NULL;
     return t;
 }
 
@@ -977,6 +981,7 @@ Type *Type::makeShared()
     t->wto = NULL;
     t->swto = NULL;
     t->vtinfo = NULL;
+    t->ctype = NULL;
     return t;
 }
 
@@ -999,6 +1004,7 @@ Type *Type::makeSharedConst()
     t->wto = NULL;
     t->swto = NULL;
     t->vtinfo = NULL;
+    t->ctype = NULL;
     return t;
 }
 
@@ -1021,6 +1027,7 @@ Type *Type::makeWild()
     t->wto = NULL;
     t->swto = NULL;
     t->vtinfo = NULL;
+    t->ctype = NULL;
     return t;
 }
 
@@ -1043,6 +1050,7 @@ Type *Type::makeSharedWild()
     t->wto = NULL;
     t->swto = NULL;
     t->vtinfo = NULL;
+    t->ctype = NULL;
     return t;
 }
 
@@ -1063,6 +1071,7 @@ Type *Type::makeMutable()
     t->wto = NULL;
     t->swto = NULL;
     t->vtinfo = NULL;
+    t->ctype = NULL;
     return t;
 }
 
@@ -1301,6 +1310,13 @@ Type *Type::aliasthisOf()
             }
             return t;
         }
+        EnumDeclaration *ed = ad->aliasthis->isEnumDeclaration();
+        if (ed)
+        {
+            Type *t = ed->type;
+            return t;
+        }
+        //printf("%s\n", ad->aliasthis->kind());
     }
     return NULL;
 }
@@ -1338,6 +1354,31 @@ int MODimplicitConv(unsigned char modfrom, unsigned char modto)
         case X(MODimmutable, MODconst | MODshared):
         case X(MODshared,    MODconst | MODshared):
         case X(MODwild | MODshared,    MODconst | MODshared):
+            return 1;
+
+        default:
+            return 0;
+    }
+    #undef X
+}
+
+/***************************
+ * Return !=0 if a method of type '() modfrom' can call a method of type '() modto'.
+ */
+int MODmethodConv(unsigned char modfrom, unsigned char modto)
+{
+    if (MODimplicitConv(modfrom, modto))
+        return 1;
+
+    #define X(m, n) (((m) << 4) | (n))
+    switch (X(modfrom, modto))
+    {
+        case X(0, MODwild):
+        case X(MODimmutable, MODwild):
+        case X(MODconst, MODwild):
+        case X(MODshared, MODshared|MODwild):
+        case X(MODshared|MODimmutable, MODshared|MODwild):
+        case X(MODshared|MODconst, MODshared|MODwild):
             return 1;
 
         default:
@@ -2067,8 +2108,9 @@ Expression *Type::noMember(Scope *sc, Expression *e, Identifier *ident)
             tiargs->push(se);
             e = new DotTemplateInstanceExp(e->loc, e, Id::opDispatch, tiargs);
             ((DotTemplateInstanceExp *)e)->ti->tempdecl = td;
+            //return e;
+            e = e->semantic(sc);
             return e;
-            //return e->semantic(sc);
         }
 
         /* See if we should forward to the alias this.
@@ -2462,11 +2504,29 @@ Type *TypeNext::makeMutable()
 }
 
 MATCH TypeNext::constConv(Type *to)
-{   MATCH m = Type::constConv(to);
+{
+    //printf("TypeNext::constConv from = %s, to = %s\n", toChars(), to->toChars());
+    if (equals(to))
+        return MATCHexact;
 
-    if (m == MATCHconst &&
-        next->constConv(((TypeNext *)to)->next) == MATCHnomatch)
-        m = MATCHnomatch;
+    if (!(ty == to->ty && MODimplicitConv(mod, to->mod)))
+        return MATCHnomatch;
+
+    Type *tn = to->nextOf();
+    if (!(tn && next->ty == tn->ty))
+        return MATCHnomatch;
+
+    MATCH m;
+    if (to->isConst())  // whole tail const conversion
+    {   // Recursive shared level check
+        m = next->constConv(tn);
+        if (m == MATCHexact)
+            m = MATCHconst;
+    }
+    else
+    {   //printf("\tnext => %s, to->next => %s\n", next->toChars(), tn->toChars());
+        m = next->equals(tn) ? MATCHconst : MATCHnomatch;
+    }
     return m;
 }
 
@@ -3706,6 +3766,12 @@ void TypeSArray::resolve(Loc loc, Scope *sc, Expression **pe, Type **pt, Dsymbol
                 *pe = (Expression *)o;
                 return;
             }
+            if (o->dyncast() == DYNCAST_TYPE)
+            {
+                *ps = NULL;
+                *pt = (Type *)o;
+                return;
+            }
 
             /* Create a new TupleDeclaration which
              * is a slice [d..d+1] out of the old one.
@@ -3949,21 +4015,27 @@ MATCH TypeSArray::implicitConvTo(Type *to)
         return MATCHnomatch;
     }
     if (to->ty == Tarray)
-    {   int offset = 0;
+    {
         TypeDArray *ta = (TypeDArray *)to;
 
         if (!MODimplicitConv(next->mod, ta->next->mod))
             return MATCHnomatch;
 
-        if (next->equals(ta->next) ||
-//          next->implicitConvTo(ta->next) >= MATCHconst ||
-            next->constConv(ta->next) != MATCHnomatch ||
-            (ta->next->isBaseOf(next, &offset) && offset == 0 &&
-             !ta->next->isMutable()) ||
-            ta->next->ty == Tvoid)
+        /* Allow conversion to void[]
+         */
+        if (ta->next->ty == Tvoid)
+        {
             return MATCHconvert;
+        }
+
+        MATCH m = next->constConv(ta->next);
+        if (m != MATCHnomatch)
+        {
+            return MATCHconvert;
+        }
         return MATCHnomatch;
     }
+
     if (to->ty == Tsarray)
     {
         if (this == to)
@@ -4095,8 +4167,9 @@ Type *TypeDArray::semantic(Loc loc, Scope *sc)
         case Tnone:
         case Ttuple:
             error(loc, "can't have array of %s", tbn->toChars());
-            tn = next = tint32;
-            break;
+        case Terror:
+            return Type::terror;
+
         case Tstruct:
         {   TypeStruct *ts = (TypeStruct *)tbn;
             if (0 && ts->sym->isnested)
@@ -4192,7 +4265,7 @@ MATCH TypeDArray::implicitConvTo(Type *to)
     }
 
     if (to->ty == Tarray)
-    {   int offset = 0;
+    {
         TypeDArray *ta = (TypeDArray *)to;
 
         if (!MODimplicitConv(next->mod, ta->next->mod))
@@ -4219,23 +4292,6 @@ MATCH TypeDArray::implicitConvTo(Type *to)
                 m = MATCHconst;
             return m;
         }
-
-#if 0
-        /* Allow conversions of T[][] to const(T)[][]
-         */
-        if (mod == ta->mod && next->ty == Tarray && ta->next->ty == Tarray)
-        {
-            m = next->implicitConvTo(ta->next);
-            if (m == MATCHconst)
-                return m;
-        }
-#endif
-
-        /* Conversion of array of derived to array of const(base)
-         */
-        if (ta->next->isBaseOf(next, &offset) && offset == 0 &&
-            !ta->next->isMutable())
-            return MATCHconvert;
     }
     return Type::implicitConvTo(to);
 }
@@ -4354,6 +4410,7 @@ printf("index->ito->ito = x%x\n", index->ito->ito);
         case Tnone:
         case Ttuple:
             error(loc, "can't have associative array key of %s", index->toBasetype()->toChars());
+        case Terror:
             return Type::terror;
     }
     next = next->semantic(loc,sc);
@@ -4365,6 +4422,7 @@ printf("index->ito->ito = x%x\n", index->ito->ito);
         case Tvoid:
         case Tnone:
             error(loc, "can't have associative array of %s", next->toChars());
+        case Terror:
             return Type::terror;
     }
     if (next->isscope())
@@ -4645,8 +4703,7 @@ MATCH TypeAArray::constConv(Type *to)
         // Pick the worst match
         return mkey < mindex ? mkey : mindex;
     }
-    else
-        return Type::constConv(to);
+    return Type::constConv(to);
 }
 
 /***************************** TypePointer *****************************/
@@ -4678,8 +4735,8 @@ Type *TypePointer::semantic(Loc loc, Scope *sc)
     {
         case Ttuple:
             error(loc, "can't have pointer to %s", n->toChars());
-            n = tint32;
-            break;
+        case Terror:
+            return Type::terror;
     }
     if (n != next)
     {
@@ -4736,7 +4793,8 @@ MATCH TypePointer::implicitConvTo(Type *to)
         return MATCHnomatch;
     }
     else if (to->ty == Tpointer)
-    {   TypePointer *tp = (TypePointer *)to;
+    {
+        TypePointer *tp = (TypePointer *)to;
         assert(tp->next);
 
         if (!MODimplicitConv(next->mod, tp->next->mod))
@@ -4763,12 +4821,6 @@ MATCH TypePointer::implicitConvTo(Type *to)
                 m = MATCHconst;
             return m;
         }
-
-        /* Conversion of ptr to derived to ptr to base
-         */
-        int offset = 0;
-        if (tp->next->isBaseOf(next, &offset) && offset == 0)
-            return MATCHconvert;
     }
     return MATCHnomatch;
 }
@@ -5011,7 +5063,7 @@ int Type::covariant(Type *t)
         goto Lnotcovariant;
 
   {
-            // Return types
+    // Return types
     Type *t1n = t1->next;
     Type *t2n = t2->next;
 
@@ -5032,6 +5084,8 @@ int Type::covariant(Type *t)
 
         // If t1n is forward referenced:
         ClassDeclaration *cd = ((TypeClass *)t1n)->sym;
+//        if (cd->scope)
+//            cd->semantic(NULL);
 #if 0
         if (!cd->baseClass && cd->baseclasses->dim && !cd->isInterfaceDeclaration())
 #else
@@ -5041,7 +5095,13 @@ int Type::covariant(Type *t)
             return 3;   // forward references
         }
     }
-    if (t1n->implicitConvTo(t2n))
+    if (t1n->ty == Tstruct && t2n->ty == Tstruct)
+    {
+        if (((TypeStruct *)t1n)->sym == ((TypeStruct *)t2n)->sym &&
+            MODimplicitConv(t1n->mod, t2n->mod))
+            goto Lcovariant;
+    }
+    else if (t1n->ty == t2n->ty && t1n->implicitConvTo(t2n))
         goto Lcovariant;
   }
     goto Lnotcovariant;
@@ -5402,6 +5462,7 @@ Type *TypeFunction::semantic(Loc loc, Scope *sc)
         Scope *argsc = sc->push();
         argsc->stc = 0;                 // don't inherit storage class
         argsc->protection = PROTpublic;
+        argsc->func = NULL;
 
         size_t dim = Parameter::dim(tf->parameters);
         for (size_t i = 0; i < dim; i++)
@@ -5620,7 +5681,7 @@ int TypeFunction::callMatch(Expression *ethis, Expressions *args, int flag)
 {
     //printf("TypeFunction::callMatch() %s\n", toChars());
     MATCH match = MATCHexact;           // assume exact match
-    bool wildmatch = FALSE;
+    unsigned wildmatch = 0;
 
     if (ethis)
     {   Type *t = ethis->type;
@@ -5638,6 +5699,17 @@ int TypeFunction::callMatch(Expression *ethis, Expressions *args, int flag)
             else
                 return MATCHnomatch;
         }
+        if (isWild())
+        {
+            if (t->isWild())
+                wildmatch |= MODwild;
+            else if (t->isConst())
+                wildmatch |= MODconst;
+            else if (t->isImmutable())
+                wildmatch |= MODimmutable;
+            else
+                wildmatch |= MODmutable;
+        }
     }
 
     size_t nparams = Parameter::dim(parameters);
@@ -5651,9 +5723,40 @@ int TypeFunction::callMatch(Expression *ethis, Expressions *args, int flag)
         match = MATCHconvert;           // match ... with a "conversion" match level
     }
 
+    for (size_t u = 0; u < nargs; u++)
+    {
+        if (u >= nparams)
+            break;
+        Parameter *p = Parameter::getNth(parameters, u);
+        Expression *arg = args->tdata()[u];
+        assert(arg);
+
+        if (!(p->storageClass & STClazy && p->type->ty == Tvoid && arg->type->ty != Tvoid))
+        {
+            unsigned mod = arg->type->wildConvTo(p->type);
+            if (mod)
+            {
+                wildmatch |= mod;
+            }
+        }
+    }
+    if (wildmatch)
+    {   /* Calculate wild matching modifier
+         */
+        if (wildmatch & MODconst || wildmatch & (wildmatch - 1))
+            wildmatch = MODconst;
+        else if (wildmatch & MODimmutable)
+            wildmatch = MODimmutable;
+        else if (wildmatch & MODwild)
+            wildmatch = MODwild;
+        else
+        {   assert(wildmatch & MODmutable);
+            wildmatch = MODmutable;
+        }
+    }
+
     for (size_t u = 0; u < nparams; u++)
     {   MATCH m;
-        Expression *arg;
 
         // BUG: what about out and ref?
 
@@ -5663,51 +5766,70 @@ int TypeFunction::callMatch(Expression *ethis, Expressions *args, int flag)
         {
             if (p->defaultArg)
                 continue;
-            if (varargs == 2 && u + 1 == nparams)
-                goto L1;
-            goto Nomatch;               // not enough arguments
+            goto L1;        // try typesafe variadics
         }
-        arg = args->tdata()[u];
+        {
+        Expression *arg = args->tdata()[u];
         assert(arg);
+
+        if (arg->op == TOKfunction)
+        {   FuncExp *fe = (FuncExp *)arg;
+            Type *pt = p->type;
+            arg = ((FuncExp *)arg)->inferType(NULL, pt);
+            if (!arg)
+                goto L1;    // try typesafe variadics
+        }
+
         //printf("arg: %s, type: %s\n", arg->toChars(), arg->type->toChars());
 
+        Type *targ = arg->type;
+        Type *tprm = wildmatch ? p->type->substWildTo(wildmatch) : p->type;
+
         // Non-lvalues do not match ref or out parameters
-        if (p->storageClass & (STCref | STCout))
+        if (p->storageClass & STCref)
+        {   if (!arg->isLvalue())
+            {   if (arg->op == TOKstring && tprm->ty == Tsarray)
+                {   if (targ->ty != Tsarray)
+                        targ = new TypeSArray(targ->nextOf(),
+                                new IntegerExp(0, ((StringExp *)arg)->len,
+                                Type::tindex));
+                }
+                else
+                    goto Nomatch;
+            }
+
+            /* Don't allow static arrays to be passed to mutable references
+             * to static arrays if the argument cannot be modified.
+             */
+            Type *targb = targ->toBasetype();
+            Type *tprmb = tprm->toBasetype();
+            //printf("%s\n", targb->toChars());
+            //printf("%s\n", tprmb->toChars());
+            if (targb->nextOf() && tprmb->ty == Tsarray &&
+                !MODimplicitConv(targb->nextOf()->mod, tprmb->nextOf()->mod))
+                goto Nomatch;
+
+            // ref variable behaves like head-const reference
+            if (!targb->constConv(tprmb))
+                goto Nomatch;
+        }
+        else if (p->storageClass & STCout)
         {   if (!arg->isLvalue())
                 goto Nomatch;
         }
 
-        if (p->storageClass & STCref)
-        {
-            /* Don't allow static arrays to be passed to mutable references
-             * to static arrays if the argument cannot be modified.
-             */
-            Type *targb = arg->type->toBasetype();
-            Type *tparb = p->type->toBasetype();
-            //printf("%s\n", targb->toChars());
-            //printf("%s\n", tparb->toChars());
-            if (targb->nextOf() && tparb->ty == Tsarray &&
-                !MODimplicitConv(targb->nextOf()->mod, tparb->nextOf()->mod))
-                goto Nomatch;
-        }
-
-        if (p->storageClass & STClazy && p->type->ty == Tvoid &&
-                arg->type->ty != Tvoid)
+        if (p->storageClass & STClazy && tprm->ty == Tvoid && targ->ty != Tvoid)
             m = MATCHconvert;
         else
         {
-            //printf("%s of type %s implicitConvTo %s\n", arg->toChars(), arg->type->toChars(), p->type->toChars());
+            //printf("%s of type %s implicitConvTo %s\n", arg->toChars(), targ->toChars(), tprm->toChars());
             if (flag)
                 // for partial ordering, value is an irrelevant mockup, just look at the type
-                m = arg->type->implicitConvTo(p->type);
+                m = targ->implicitConvTo(tprm);
             else
-                m = arg->implicitConvTo(p->type);
+                m = arg->implicitConvTo(tprm);
             //printf("match %d\n", m);
-            if (m == MATCHnomatch && arg->type->wildConvTo(p->type))
-            {
-                wildmatch = TRUE;       // mod matched to wild
-                m = MATCHconst;
-            }
+        }
         }
 
         /* prefer matching the element type rather than the array
@@ -5736,9 +5858,17 @@ int TypeFunction::callMatch(Expression *ethis, Expressions *args, int flag)
                     {   TypeArray *ta = (TypeArray *)tb;
                         for (; u < nargs; u++)
                         {
-                            arg = args->tdata()[u];
+                            Expression *arg = args->tdata()[u];
                             assert(arg);
 #if 1
+                            if (arg->op == TOKfunction)
+                            {   FuncExp *fe = (FuncExp *)arg;
+                                Type *pt = tb->nextOf();
+                                arg = ((FuncExp *)arg)->inferType(NULL, pt);
+                                if (!arg)
+                                    goto Nomatch;
+                            }
+
                             /* If lazy array of delegates,
                              * convert arg(s) to delegate(s)
                              */
@@ -6153,13 +6283,9 @@ void TypeQualified::resolveHelper(Loc loc, Scope *sc,
                     for (; i < idents.dim; i++)
                     {
                         id = idents.tdata()[i];
-                        //printf("e: '%s', id: '%s', type = %p\n", e->toChars(), id->toChars(), e->type);
-                        if (id == Id::offsetof || !e->type)
-                        {   e = new DotIdExp(e->loc, e, id);
-                            e = e->semantic(sc);
-                        }
-                        else
-                            e = e->type->dotExp(sc, e, id);
+                        //printf("e: '%s', id: '%s', type = %s\n", e->toChars(), id->toChars(), e->type->toChars());
+                        e = new DotIdExp(e->loc, e, id);
+                        e = e->semantic(sc);
                     }
                     if (e->op == TOKtype)
                         *pt = e->type;
@@ -6491,7 +6617,9 @@ void TypeInstance::resolve(Loc loc, Scope *sc, Expression **pe, Type **pt, Dsymb
     //printf("TypeInstance::resolve(sc = %p, idents = '%s')\n", sc, id->toChars());
     s = tempinst;
     if (s)
+    {   //printf("s = %s\n", s->toChars());
         s->semantic(sc);
+    }
     resolveHelper(loc, sc, s, NULL, pe, pt, ps);
     if (*pt)
         *pt = (*pt)->addMod(mod);
@@ -6658,6 +6786,7 @@ Type *TypeTypeof::semantic(Loc loc, Scope *sc)
     {
         Scope *sc2 = sc->push();
         sc2->intypeof++;
+        sc2->flags |= sc->flags & SCOPEstaticif;
         exp = exp->semantic(sc2);
 #if DMDV2
         if (exp->type && exp->type->ty == Tfunction &&
@@ -7443,11 +7572,28 @@ Expression *TypeStruct::dotExp(Scope *sc, Expression *e, Identifier *ident)
          * (e.field0, e.field1, e.field2, ...)
          */
         e = e->semantic(sc);    // do this before turning on noaccesscheck
+        e->type->size();        // do semantic of type
         Expressions *exps = new Expressions;
         exps->reserve(sym->fields.dim);
+
+        Expression *ev = e;
         for (size_t i = 0; i < sym->fields.dim; i++)
         {   VarDeclaration *v = sym->fields.tdata()[i];
-            Expression *fe = new DotVarExp(e->loc, e, v);
+            Expression *fe;
+            if (i == 0 && sc->func && sym->fields.dim > 1 &&
+                e->hasSideEffect())
+            {
+                Identifier *id = Lexer::uniqueId("__tup");
+                ExpInitializer *ei = new ExpInitializer(e->loc, e);
+                VarDeclaration *vd = new VarDeclaration(e->loc, NULL, id, ei);
+                vd->storage_class |= STCctfe | STCref | STCforeach;
+
+                ev = new VarExp(e->loc, vd);
+                fe = new CommaExp(e->loc, new DeclarationExp(e->loc, vd), ev);
+                fe = new DotVarExp(e->loc, fe, v);
+            }
+            else
+                fe = new DotVarExp(ev->loc, ev, v);
             exps->push(fe);
         }
         e = new TupleExp(e->loc, exps);
@@ -7519,7 +7665,7 @@ L1:
     if (td)
     {
         e = new DotTemplateExp(e->loc, e, td);
-        e->semantic(sc);
+        e = e->semantic(sc);
         return e;
     }
 
@@ -7539,8 +7685,7 @@ L1:
         return de;
     }
 
-    Import *timp = s->isImport();
-    if (timp)
+    if (s->isImport() || s->isModule() || s->isPackage())
     {
         e = new DsymbolExp(e->loc, s, 0);
         e = e->semantic(sc);
@@ -7803,7 +7948,10 @@ unsigned TypeStruct::wildConvTo(Type *tprm)
         return Type::wildConvTo(tprm);
 
     if (sym->aliasthis)
-        return aliasthisOf()->wildConvTo(tprm);
+    {   Type *t = aliasthisOf();
+        assert(t);
+        return t->wildConvTo(tprm);
+    }
 
     return 0;
 }
@@ -7897,14 +8045,42 @@ Expression *TypeClass::dotExp(Scope *sc, Expression *e, Identifier *ident)
         /* Create a TupleExp
          */
         e = e->semantic(sc);    // do this before turning on noaccesscheck
+
+        /* If this is called in the middle of a class declaration,
+         *  class Inner {
+         *    int x;
+         *    alias typeof(Inner.tupleof) T;
+         *    int y;
+         *  }
+         * then Inner.y will be omitted from the tuple.
+         */
+        // Detect that error, and at least try to run semantic() on it if we can
+        sym->size(e->loc);
+
         Expressions *exps = new Expressions;
         exps->reserve(sym->fields.dim);
+
+        Expression *ev = e;
         for (size_t i = 0; i < sym->fields.dim; i++)
         {   VarDeclaration *v = sym->fields.tdata()[i];
             // Don't include hidden 'this' pointer
             if (v->isThisDeclaration())
                 continue;
-            Expression *fe = new DotVarExp(e->loc, e, v);
+            Expression *fe;
+            if (i == 0 && sc->func && sym->fields.dim > 1 &&
+                e->hasSideEffect())
+            {
+                Identifier *id = Lexer::uniqueId("__tup");
+                ExpInitializer *ei = new ExpInitializer(e->loc, e);
+                VarDeclaration *vd = new VarDeclaration(e->loc, NULL, id, ei);
+                vd->storage_class |= STCctfe | STCref | STCforeach;
+
+                ev = new VarExp(e->loc, vd);
+                fe = new CommaExp(e->loc, new DeclarationExp(e->loc, vd), ev);
+                fe = new DotVarExp(e->loc, fe, v);
+            }
+            else
+                fe = new DotVarExp(e->loc, ev, v);
             exps->push(fe);
         }
         e = new TupleExp(e->loc, exps);
@@ -7920,14 +8096,10 @@ L1:
     if (!s)
     {
         // See if it's a base class
-        ClassDeclaration *cbase;
-        for (cbase = sym->baseClass; cbase; cbase = cbase->baseClass)
+        if (Dsymbol *cbase = sym->searchBase(e->loc, ident))
         {
-            if (cbase->ident->equals(ident))
-            {
-                e = new DotTypeExp(0, e, cbase);
-                return e;
-            }
+            e = new DotTypeExp(0, e, cbase);
+            return e;
         }
 
         if (ident == Id::classinfo)
@@ -8051,7 +8223,7 @@ L1:
     if (td)
     {
         e = new DotTemplateExp(e->loc, e, td);
-        e->semantic(sc);
+        e = e->semantic(sc);
         return e;
     }
 
@@ -8070,6 +8242,15 @@ L1:
         de->type = e->type;
         return de;
     }
+
+#if 0 // shouldn't this be here?
+    if (s->isImport() || s->isModule() || s->isPackage())
+    {
+        e = new DsymbolExp(e->loc, s, 0);
+        e = e->semantic(sc);
+        return e;
+    }
+#endif
 
     OverloadSet *o = s->isOverloadSet();
     if (o)
@@ -8152,7 +8333,6 @@ L1:
     if (d->parent && d->toParent()->isModule())
     {
         // (e, d)
-
         VarExp *ve = new VarExp(e->loc, d, 1);
         e = new CommaExp(e->loc, e, ve);
         e->type = d->type;
@@ -8193,9 +8373,14 @@ MATCH TypeClass::implicitConvTo(Type *to)
         return m;
 
     ClassDeclaration *cdto = to->isClassHandle();
-    if (cdto && cdto->isBaseOf(sym, NULL))
-    {   //printf("'to' is base\n");
-        return MATCHconvert;
+    if (cdto)
+    {
+        if (cdto->scope)
+            cdto->semantic(NULL);
+        if (cdto->isBaseOf(sym, NULL))
+        {   //printf("'to' is base\n");
+            return MATCHconvert;
+        }
     }
 
     if (global.params.Dversion == 1)
@@ -8219,6 +8404,13 @@ MATCH TypeClass::constConv(Type *to)
     if (ty == to->ty && sym == ((TypeClass *)to)->sym &&
         MODimplicitConv(mod, to->mod))
         return MATCHconst;
+
+    /* Conversion derived to const(base)
+     */
+    int offset = 0;
+    if (to->isBaseOf(this, &offset) && offset == 0 && !to->isMutable())
+        return MATCHconvert;
+
     return MATCHnomatch;
 }
 
@@ -8773,8 +8965,7 @@ void Parameter::argsToDecoBuffer(OutBuffer *buf, Parameters *arguments)
 {
     //printf("Parameter::argsToDecoBuffer()\n");
     // Write argument types
-    if (arguments)
-        foreach(arguments, &argsToDecoBufferDg, buf);
+    foreach(arguments, &argsToDecoBufferDg, buf);
 }
 
 /****************************************
@@ -8792,9 +8983,7 @@ static int isTPLDg(void *ctx, size_t n, Parameter *arg)
 int Parameter::isTPL(Parameters *arguments)
 {
     //printf("Parameter::isTPL()\n");
-    if (arguments)
-        return foreach(arguments, &isTPLDg, NULL);
-    return 0;
+    return foreach(arguments, &isTPLDg, NULL);
 }
 
 /****************************************************
@@ -8845,7 +9034,7 @@ void Parameter::toDecoBuffer(OutBuffer *buf)
             break;
         default:
 #ifdef DEBUG
-            printf("storageClass = x%lx\n", storageClass & (STCin | STCout | STCref | STClazy));
+            printf("storageClass = x%llx\n", storageClass & (STCin | STCout | STCref | STClazy));
             halt();
 #endif
             assert(0);
@@ -8874,8 +9063,7 @@ static int dimDg(void *ctx, size_t n, Parameter *)
 size_t Parameter::dim(Parameters *args)
 {
     size_t n = 0;
-    if (args)
-        foreach(args, &dimDg, &n);
+    foreach(args, &dimDg, &n);
     return n;
 }
 
@@ -8920,7 +9108,9 @@ Parameter *Parameter::getNth(Parameters *args, size_t nth, size_t *pn)
 
 int Parameter::foreach(Parameters *args, Parameter::ForeachDg dg, void *ctx, size_t *pn)
 {
-    assert(args && dg);
+    assert(dg);
+    if (!args)
+        return 0;
 
     size_t n = pn ? *pn : 0; // take over index
     int result = 0;

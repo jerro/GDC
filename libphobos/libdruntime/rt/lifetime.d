@@ -446,6 +446,15 @@ extern(C) void rt_processGCMarks(void[] tls)
 /**
   Get the cached block info of an interior pointer.  Returns null if the
   interior pointer's block is not cached.
+  
+  NOTE: The base ptr in this struct can be cleared asynchronously by the GC,
+        so any use of the returned BlkInfo should copy it and then check the
+        base ptr of the copy before actually using it.
+        
+  TODO: Change this function so the caller doesn't have to be aware of this
+        issue.  Either return by value and expect the caller to always check
+        the base ptr as an indication of whether the struct is valid, or set
+        the BlkInfo as a side-effect and return a bool to indicate success.
   */
 BlkInfo *__getBlkInfo(void *interior)
 {
@@ -840,7 +849,6 @@ extern (C) void[] _d_newarrayiT(TypeInfo ti, size_t length)
         auto initializer = ti.next.init();
         auto isize = initializer.length;
         auto q = initializer.ptr;
-
         version (D_InlineAsm_X86)
         {
             asm
@@ -1123,7 +1131,7 @@ extern (C) void rt_finalize(void* p, bool det = true)
 {
     debug(PRINTF) printf("rt_finalize(p = %p)\n", p);
 
-    if (p) // not necessary if called from gc
+    if (p) 
     {
         ClassInfo** pc = cast(ClassInfo**)p;
 
@@ -1162,6 +1170,45 @@ extern (C) void rt_finalize(void* p, bool det = true)
     }
 }
 
+/**
+ * An optimized version of rt_finalize that assumes it's being called from
+ * the garbage collector and avoids wasting time on things that are
+ * irrelevant in this case.
+ */
+extern (C) void rt_finalize_gc(void* p)
+{
+    debug(PRINTF) printf("rt_finalize_gc(p = %p)\n", p);
+
+    ClassInfo** pc = cast(ClassInfo**)p;
+    
+    if (*pc) 
+    {
+        ClassInfo c = **pc;
+
+        try
+        {
+            if (collectHandler is null || collectHandler(cast(Object)p))
+            {
+                do
+                {
+                    if (c.destructor)
+                    {
+                        fp_t fp = cast(fp_t)c.destructor;
+                        (*fp)(cast(Object)p); // call destructor
+                    }
+                    c = c.base;
+                } while (c);
+            }
+            if ((cast(void**)p)[1]) // if monitor is not null
+                _d_monitordelete(cast(Object)p, false);
+        }
+        catch (Throwable e)
+        {
+            onFinalizeError(**pc, e);
+        }
+    }
+}
+
 
 /**
  * Resize dynamic arrays with 0 initializers.
@@ -1191,7 +1238,6 @@ body
             return newdata[0 .. newlength];
         }
         size_t sizeelem = ti.next.tsize();
-
         version (D_InlineAsm_X86)
         {
             size_t newsize = void;
