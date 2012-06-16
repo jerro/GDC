@@ -1,3 +1,45 @@
+2012-16-06  Iain Buclaw  <ibuclaw@ubuntu.com>
+
+	* dfrontend: Merged with DMD 2.059.
+	* d-builtins2.cc(gcc_type_to_d_type): Use new frontend value.
+	* d-codegen.cc(IRState::getLibCallDecl): Fix return type of _aaDelp.
+	(IRState::getVThis): Use frontend provided member to determine if
+	function has nested references.
+	* d-decl.cc(FuncDeclaration::toSymbol): Weakly pure functions don't
+	guarantee no vops.
+	* d-gcc-real.cc(max_float_mode): Remove.
+	(real_t::convert): Catch imaginary types in conversion.
+	* d-glue.cc(EqualExp::toElem): Use memcmp for struct comparisons.
+	(CatAssignExp::toElem): Rework order of logic to allow appending
+	delegates to an array.
+	(DelegateExp::toElem): Implement handling of lambda functions.
+	(FuncExp::toElem): Ditto.
+	(AssocArrayLiteralExp::toElem): Implement handling of AssociativeArray
+	types sent to backend.
+	* d-objfile.cc(lmtab): Remove.
+	(cvtLocToloc_t): Update implementation.
+	(outdata): Now assert that we don't receive error nodes.
+
+2012-06-05  Iain Buclaw  <ibuclaw@ubuntu.com>
+
+	* d-decls.cc(FuncDeclaration::toSymbol): Make better use of 'pure' and
+	'pure const' functions in GCC codegen.
+	* d-bi-attrs.h: Added TM_ATTR* masks.
+	(handle_tm_wrap_attribute, handle_tm_attribute, tm_attr_to_mask,
+	find_tm_attribute): New.
+	(struct d_common_attribute_table): Added transaction* attributes.
+
+2012-06-04  Iain Buclaw  <ibuclaw@ubuntu.com>
+
+	* d-objfile.cc(ObjectFile::outputThunk): Output thunks moved back to
+	the frontend, as backend does not emit them for DECL_EXTERNAL functions.
+
+2012-05-29  Daniel Green  <venix1@gmail.com>
+
+	* setup-gcc.sh: Add GCC 4.8 to list of supported GCC versions. Patch
+	courtesy of Calrama
+	https://bitbucket.org/goshawk/gdc/issue/345
+
 2012-05-29  Iain Buclaw  <ibuclaw@ubuntu.com>
 
 	* d-codegen.cc(IRState::endCase): Remove parameter from function. Use
